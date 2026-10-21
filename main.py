@@ -98,7 +98,9 @@ def check_contracts(file_path):
 
 def build_email_body(df, today, week_end, target_2w, target_2m):
     """Формирует HTML-письмо.
-    Красным жирным выделяются только договоры, заканчивающиеся в течение 1 недели.
+    - 1 неделя: красный жирный;
+    - 2 недели: чёрный жирный;
+    - 2 месяца: обычный шрифт.
     """
     if df.empty:
         return None
@@ -117,8 +119,13 @@ def build_email_body(df, today, week_end, target_2w, target_2m):
 
     for _, row in df.iterrows():
         cat = row["_category"]
-        urgent = cat == "1w"
-        style = "color:#c00000;font-weight:bold;" if urgent else ""
+        if cat == "1w":
+            style = "color:#c00000;font-weight:bold;"
+        elif cat == "2w":
+            style = "color:#000000;font-weight:bold;"
+        else:
+            style = ""
+
         broker = row.get("брокер/бывшее название", "")
         broker = "" if pd.isna(broker) else str(broker)
 
@@ -135,12 +142,14 @@ def build_email_body(df, today, week_end, target_2w, target_2m):
 
     parts.append("</ul>")
     parts.append(
-        f"<p><span style='color:#c00000;font-weight:bold;'>"
-        f"Красным жирным</span> выделены договоры, заканчивающиеся в течение 1 недели "
-        f"(с {today.strftime('%d.%m.%Y')} по {week_end.strftime('%d.%m.%Y')}).<br>"
-        f"Также в письмо включены договоры, заканчивающиеся ровно через 2 недели "
-        f"({target_2w.strftime('%d.%m.%Y')}) и ровно через 2 месяца "
-        f"({target_2m.strftime('%d.%m.%Y')}).</p>"
+        f"<p>"
+        f"<span style='color:#c00000;font-weight:bold;'>Красным жирным</span> — договоры, "
+        f"заканчивающиеся в течение 1 недели (с {today.strftime('%d.%m.%Y')} по {week_end.strftime('%d.%m.%Y')}).<br>"
+        f"<span style='color:#000000;font-weight:bold;'>Чёрным жирным</span> — договоры, "
+        f"заканчивающиеся ровно через 2 недели ({target_2w.strftime('%d.%m.%Y')}).<br>"
+        f"Обычным шрифтом — договоры, заканчивающиеся ровно через 2 месяца "
+        f"({target_2m.strftime('%d.%m.%Y')})."
+        f"</p>"
     )
     parts.append("<p>Пожалуйста, свяжитесь с ответственными лицами для продления.</p>")
 
