@@ -36,10 +36,10 @@ def download_yandex_disk_file(public_url):
 
 
 def check_contracts(file_path):
-    """Отбирает договоры:
-    - заканчивающиеся в течение 1 недели (сегодня ... сегодня+7 дней);
-    - заканчивающиеся ровно через 2 недели;
-    - заканчивающиеся ровно через 2 месяца.
+    """Отбирает договоры трёх категорий:
+    - 1w: срок уже истёк ИЛИ истекает в течение ближайшей недели (по сегодня+7);
+    - 2w: дата окончания ровно через 2 недели;
+    - 2m: дата окончания ровно через 2 месяца.
     Оставляет только ответственных Вика / Иван / Маша.
     """
     df = pd.read_excel(file_path, sheet_name=0, engine="openpyxl")
@@ -60,22 +60,17 @@ def check_contracts(file_path):
     df[col_end_date] = pd.to_datetime(df[col_end_date], errors="coerce", dayfirst=True).dt.date
 
     today = datetime.now().date()
-    week_end = today + timedelta(days=7)          # граница «в течение 1 недели»
+    week_end = today + timedelta(days=7)          # правая граница «в течение 1 недели»
     target_2w = today + relativedelta(weeks=2)    # ровно через 2 недели
     target_2m = today + relativedelta(months=2)   # ровно через 2 месяца
 
     # Фильтр по ответственным (без учёта регистра и лишних пробелов)
     manager_ok = df[col_manager].astype(str).str.strip().str.lower().isin(ALLOWED_MANAGERS)
 
-    # Категории
-    is_1w = (df[col_end_date] >= today) & (df[col_end_date] <= week_end)
-    is_2w = df[col_end_date] == target_2w
-    is_2m = df[col_end_date] == target_2m
-
-    filtered = df[manager_ok & (is_1w | is_2w | is_2m)].copy()
-
     def category(d):
-        if today <= d <= week_end:
+        if pd.isna(d):
+            return None
+        if d <= week_end:          # включает просроченные (в прошлом) и попадающие в ближайшие 7 дней
             return "1w"
         if d == target_2w:
             return "2w"
@@ -83,14 +78,18 @@ def check_contracts(file_path):
             return "2m"
         return None
 
-    filtered["_category"] = filtered[col_end_date].apply(category)
+    df["_category"] = df[col_end_date].apply(category)
+    filtered = df[manager_ok & df["_category"].notna()].copy()
 
-    # Сортировка: сначала «в течение 1 недели», затем 2 недели, затем 2 месяца
+    # Сортировка: сначала 1 неделя/просрочено, затем 2 недели, затем 2 месяца; внутри — по дате
     order = {"1w": 0, "2w": 1, "2m": 2}
     filtered["_order"] = filtered["_category"].map(order)
     filtered = filtered.sort_values(by=["_order", col_end_date], ascending=[True, True])
 
-    print(f"Сегодня: {today} | 1 неделя: до {week_end} | 2 недели: {target_2w} | 2 месяца: {target_2m}")
+    print(
+        f"Сегодня: {today} | 1 неделя/просрочено: до {week_end} | "
+        f"2 недели: {target_2w} | 2 месяца: {target_2m}"
+    )
     print(f"Найдено совпадений: {len(filtered)}")
 
     return filtered, today, week_end, target_2w, target_2m
@@ -98,9 +97,10 @@ def check_contracts(file_path):
 
 def build_email_body(df, today, week_end, target_2w, target_2m):
     """Формирует HTML-письмо.
-    - 1 неделя: красный жирный;
-    - 2 недели: чёрный жирный;
-    - 2 месяца: обычный шрифт.
+    - 1w: дата «Период до» выделена красным жирным, остальной текст обычный;
+    - 2w: весь блок выделен чёрным жирным (как было);
+    - 2m: обычный шрифт.
+    Между договорами — пустая строка.
     """
     if df.empty:
         return None
@@ -108,48 +108,52 @@ def build_email_body(df, today, week_end, target_2w, target_2m):
     parts = [
         "<p>Добрый день!</p>",
         "<p>Напоминаем о договорах, требующих продления:</p>",
-        "<ul>",
     ]
 
     labels = {
-        "1w": f"в течение 1 недели (до {week_end.strftime('%d.%m.%Y')})",
+        "1w": f"срок истёк или истекает в течение 1 недели (по {week_end.strftime('%d.%m.%Y')})",
         "2w": f"ровно через 2 недели ({target_2w.strftime('%d.%m.%Y')})",
         "2m": f"ровно через 2 месяца ({target_2m.strftime('%d.%m.%Y')})",
     }
 
     for _, row in df.iterrows():
         cat = row["_category"]
+        date_str = row["период (до)"].strftime("%d.%m.%Y")
+
+        # Выделение периода (до) для категории «1 неделя / просрочено»
         if cat == "1w":
-            style = "color:#c00000;font-weight:bold;"
-        elif cat == "2w":
-            style = "color:#000000;font-weight:bold;"
+            date_html = f'<span style="color:#c00000;font-weight:bold;">{date_str}</span>'
         else:
-            style = ""
+            date_html = date_str
 
         broker = row.get("брокер/бывшее название", "")
         broker = "" if pd.isna(broker) else str(broker)
 
-        parts.append(
-            f'<li style="{style}">'
+        item = (
             f"<b>Страхователь:</b> {html.escape(str(row['страхователь']))}<br>"
             f"<b>Вид страхования:</b> {html.escape(str(row['вид страхования']))}<br>"
             f"<b>Брокер/Бывшее название:</b> {html.escape(broker)}<br>"
             f"<b>Ответственный:</b> {html.escape(str(row['ответственный']))}<br>"
-            f"<b>Период до:</b> {row['период (до)'].strftime('%d.%m.%Y')}<br>"
+            f"<b>Период до:</b> {date_html}<br>"
             f"<b>Срок:</b> {labels[cat]}"
-            f"</li><br>"
         )
 
-    parts.append("</ul>")
+        # Категория «2 недели» — весь блок жирным чёрным (как раньше)
+        if cat == "2w":
+            item = f'<span style="color:#000000;font-weight:bold;">{item}</span>'
+
+        # Двойной <br> даёт пустую строку между договорами
+        parts.append(item + "<br><br>")
+
     parts.append(
-        f"<p>"
-        f"<span style='color:#c00000;font-weight:bold;'>Красным жирным</span> — договоры, "
-        f"заканчивающиеся в течение 1 недели (с {today.strftime('%d.%m.%Y')} по {week_end.strftime('%d.%m.%Y')}).<br>"
-        f"<span style='color:#000000;font-weight:bold;'>Чёрным жирным</span> — договоры, "
-        f"заканчивающиеся ровно через 2 недели ({target_2w.strftime('%d.%m.%Y')}).<br>"
+        "<hr>"
+        f"<p><span style='color:#c00000;font-weight:bold;'>Красным</span> выделена дата «Период до» "
+        f"у договоров, срок которых истёк или истекает в течение 1 недели "
+        f"(по {week_end.strftime('%d.%m.%Y')}).<br>"
+        f"Чёрным жирным выделены договоры, заканчивающиеся ровно через 2 недели "
+        f"({target_2w.strftime('%d.%m.%Y')}).<br>"
         f"Обычным шрифтом — договоры, заканчивающиеся ровно через 2 месяца "
-        f"({target_2m.strftime('%d.%m.%Y')})."
-        f"</p>"
+        f"({target_2m.strftime('%d.%m.%Y')}).</p>"
     )
     parts.append("<p>Пожалуйста, свяжитесь с ответственными лицами для продления.</p>")
 
@@ -181,7 +185,7 @@ def main():
 
     body = build_email_body(filtered_df, today, week_end, target_2w, target_2m)
     subject = (
-        f"Продление договоров: 1 неделя (до {week_end.strftime('%d.%m.%Y')}), "
+        f"Продление договоров: 1 неделя/просрочено (до {week_end.strftime('%d.%m.%Y')}), "
         f"2 недели ({target_2w.strftime('%d.%m.%Y')}), "
         f"2 месяца ({target_2m.strftime('%d.%m.%Y')})"
     )
